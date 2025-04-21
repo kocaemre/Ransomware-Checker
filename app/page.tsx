@@ -1,14 +1,52 @@
 "use client";
 
+import { useSession } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { toast } from "sonner";
+import { Upload, Shield, History } from "lucide-react";
 import Navbar from "./components/Navbar";
 import DropzoneUploader from "./components/DropzoneUploader";
 
 export default function Home() {
-  // State management
+  const { data: session } = useSession();
+  const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [result, setResult] = useState<"clean" | "infected" | null>(null);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!session) {
+      toast.error("Please login to upload files");
+      router.push("/login");
+      return;
+    }
+
+    const selectedFile = e.target.files?.[0];
+    if (selectedFile) {
+      setFile(selectedFile);
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!file) return;
+
+    setIsLoading(true);
+    try {
+      // TODO: Implement file upload and VirusTotal API integration
+      toast.success("File uploaded successfully", {
+        description: "Scanning in progress...",
+      });
+    } catch (error) {
+      toast.error("Failed to upload file");
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   // Function that runs when a file is selected
   const handleFileSelect = (selectedFile: File) => {
@@ -17,20 +55,50 @@ export default function Home() {
   };
 
   // Analysis process (simulation for now)
-  const startAnalysis = (selectedFile: File) => {
+  const startAnalysis = async (selectedFile: File) => {
     setIsAnalyzing(true);
     setResult(null);
 
-    // Additional operations on the selected file
-    console.log("Starting analysis:", selectedFile.name);
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
 
-    // Simulated analysis process (2 seconds)
-    setTimeout(() => {
-      // Random result (in real application, it would go to an API)
-      const isInfected = Math.random() > 0.5;
+      const response = await fetch("/api/scan", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || "Failed to analyze file");
+      }
+
+      const data = await response.json();
+      
+      console.log("Scan response:", data);
+      
+      // Correctly access scan results based on the API response format
+      const scanData = data.scan;
+      
+      // Check scan results
+      const isInfected = scanData.scanResults.stats?.malicious > 0;
       setResult(isInfected ? "infected" : "clean");
+      
+      // Show appropriate toast message
+      if (isInfected) {
+        toast.error(`Threats detected! (${scanData.scanResults.stats.malicious} malicious)`);
+      } else {
+        toast.success("File is clean! No threats detected.");
+      }
+
+      // Redirect to scan details
+      router.push(`/scan-history/${scanData.id}`);
+    } catch (error: any) {
+      toast.error(error.message || "Failed to analyze file");
+      setResult(null);
+    } finally {
       setIsAnalyzing(false);
-    }, 2000);
+    }
   };
 
   // Format file size

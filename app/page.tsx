@@ -7,12 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Upload, Shield, History } from "lucide-react";
+import { Upload, Shield, History, LogIn, FileCheck } from "lucide-react";
 import Navbar from "./components/Navbar";
 import DropzoneUploader from "./components/DropzoneUploader";
+import Link from "next/link";
 
 export default function Home() {
-  const { data: session } = useSession();
+  const { data: session, status } = useSession();
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -132,17 +133,44 @@ export default function Home() {
         <div className="max-w-4xl mx-auto">
           {!file ? (
             <>
-              <DropzoneUploader onFileSelect={handleFileSelect} />
-              <div className="mt-10 text-center">
-                <div className="space-y-3 max-w-2xl mx-auto">
-                  <p className="font-semibold text-lg text-gray-700">
-                    Ransomware Checker scans suspicious files to protect you from potential threats.
+              {status === "authenticated" ? (
+                <>
+                  <DropzoneUploader onFileSelect={handleFileSelect} />
+                  <div className="mt-10 text-center">
+                    <div className="space-y-3 max-w-2xl mx-auto">
+                      <p className="font-semibold text-lg text-gray-700">
+                        Ransomware Checker scans suspicious files to protect you from potential threats.
+                      </p>
+                      <p className="text-gray-600">
+                        Upload your file now to test its security.
+                      </p>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-12 bg-white rounded-xl shadow-sm">
+                  <div className="flex justify-center mb-6">
+                    <div className="h-24 w-24 rounded-full bg-blue-50 flex items-center justify-center">
+                      <FileCheck className="h-12 w-12 text-blue-500" />
+                    </div>
+                  </div>
+                  <h2 className="text-2xl font-bold mb-4">File Security Analysis</h2>
+                  <p className="text-gray-600 max-w-lg mx-auto mb-8">
+                    Login to access our ransomware scanning tool. Analyze your files for potential threats and protect your data.
                   </p>
-                  <p className="text-gray-600">
-                    Upload your file now to test its security.
-                  </p>
+                  <Link href="/login">
+                    <Button size="lg" className="mr-4">
+                      <LogIn className="mr-2 h-4 w-4" />
+                      Login to Scan Files
+                    </Button>
+                  </Link>
+                  <Link href="/register">
+                    <Button variant="outline" size="lg">
+                      Create Account
+                    </Button>
+                  </Link>
                 </div>
-              </div>
+              )}
             </>
           ) : (
             <div className="w-full max-w-xl mx-auto bg-white p-8 rounded-xl shadow-sm">

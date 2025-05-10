@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { calculateFileHash, scanFile, getComprehensiveAnalysis, getFileReport } from "@/lib/virustotal";
+import { calculateFileHash, scanFile, getComprehensiveAnalysis } from "@/lib/virustotal";
 
 // Desteklenen dosya türleri
 const SUPPORTED_FILE_TYPES = [
@@ -87,15 +87,60 @@ function rateLimitedCall<T>(key: string, apiCall: () => Promise<T>, maxAgeMs = 1
   });
 }
 
+// Kendi veritabanımızda bir hash kontrolü yap
+async function checkLocalHashDatabase(hash: string): Promise<boolean> {
+  try {
+    // MaliciousHash tablosunda bu hash var mı kontrol et
+    const maliciousHash = await prisma.maliciousHash.findUnique({
+      where: { hash }
+    });
+    
+    return !!maliciousHash; // Eğer hash bulunduysa true, bulunamadıysa false döner
+  } catch (error) {
+    console.error("Error checking local hash database:", error);
+    return false; // Hata durumunda zararsız kabul et
+  }
+}
+
+// Yerel veritabanımızda tespit edildiğinde oluşturulacak analiz sonucu
+function createLocalDetectionResult(hash: string, source: string): any {
+  return {
+    status: "completed",
+    source: source,
+    stats: {
+      malicious: 1,
+      suspicious: 0,
+      undetected: 0,
+      harmless: 0,
+      timeout: 0,
+      "confirmed-timeout": 0,
+      failure: 0,
+      "type-unsupported": 0
+    },
+    results: {
+      "local_database": {
+        category: "malicious",
+        engine_name: "Local Hash Database",
+        engine_version: "1.0",
+        result: "Malicious file",
+        method: "hash_lookup",
+        engine_update: new Date().toISOString().split('T')[0]
+      }
+    }
+  };
+}
+
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session?.user?.id) {
+    if (!session?.user) {
       return NextResponse.json(
         { error: "Unauthorized" },
         { status: 401 }
       );
     }
+
+    const userId = session.user.id;
 
     const formData = await request.formData();
     const file = formData.get("file") as File;
@@ -134,13 +179,37 @@ export async function POST(request: NextRequest) {
     const existingScan = await prisma.scan.findFirst({
       where: {
         fileHash,
-        userId: session.user.id,
+        userId,
       },
     });
 
     if (existingScan) {
       console.log("Found existing scan:", existingScan.id);
       return NextResponse.json({ scan: existingScan });
+    }
+
+    // Önce kendi veritabanımızda bu hash'i kontrol et
+    const isHashInLocalDb = await checkLocalHashDatabase(fileHash);
+    
+    if (isHashInLocalDb) {
+      console.log("Hash found in local database:", fileHash);
+      
+      // Yerel veritabanımızda bulundu, zararlı olarak işaretle
+      const localDetectionResult = createLocalDetectionResult(fileHash, "local_database");
+      
+      // Tarama kaydı oluştur
+      const scan = await prisma.scan.create({
+        data: {
+          userId,
+          fileName: file.name,
+          fileHash,
+          fileSize: file.size,
+          status: "completed",
+          scanResults: localDetectionResult as any
+        },
+      });
+      
+      return NextResponse.json({ scan });
     }
 
     // Check if file was already scanned in VirusTotal - use rate limited call
@@ -155,12 +224,12 @@ export async function POST(request: NextRequest) {
         console.log("Existing VirusTotal report found");
         const scan = await prisma.scan.create({
           data: {
-            userId: session.user.id,
+            userId,
             fileName: file.name,
             fileHash,
             fileSize: file.size,
             status: "completed",
-            scanResults: existingReport
+            scanResults: existingReport as any
           },
         });
         return NextResponse.json({ scan });
@@ -187,7 +256,7 @@ export async function POST(request: NextRequest) {
     // Create scan record in pending state
     const scan = await prisma.scan.create({
       data: {
-        userId: session.user.id,
+        userId,
         fileName: file.name,
         fileHash,
         fileSize: file.size,
@@ -224,7 +293,7 @@ export async function POST(request: NextRequest) {
           where: { id: scan.id },
           data: {
             status: analysisResult.status,
-            scanResults: analysisResult
+            scanResults: analysisResult as any
           },
         });
         

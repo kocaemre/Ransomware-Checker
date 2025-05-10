@@ -20,10 +20,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Shield } from "lucide-react";
+import { Shield, Database, ShieldAlert } from "lucide-react";
 
 export default function Navbar() {
   const { data: session } = useSession();
+  const isAdmin = session?.user?.email === "zeze@gmail.com";
 
   return (
     <nav className="border-b bg-white/75 backdrop-blur-lg sticky top-0 z-50">
@@ -51,6 +52,16 @@ export default function Navbar() {
                   </Link>
                 </NavigationMenuLink>
               </NavigationMenuItem>
+              {session && isAdmin && (
+                <NavigationMenuItem>
+                  <NavigationMenuLink asChild>
+                    <Link href="/hash-manager" className="px-3 py-2 rounded-md text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors flex items-center">
+                      
+                      Hash Manager
+                    </Link>
+                  </NavigationMenuLink>
+                </NavigationMenuItem>
+              )}
             </NavigationMenuList>
           </NavigationMenu>
         </div>
@@ -74,6 +85,9 @@ export default function Navbar() {
                     <p className="text-xs leading-none text-muted-foreground">
                       {session.user?.email}
                     </p>
+                    {isAdmin && (
+                      <p className="text-xs text-primary font-semibold mt-1">Admin</p>
+                    )}
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />

@@ -56,7 +56,7 @@ export default function Navbar() {
                 <NavigationMenuItem>
                   <NavigationMenuLink asChild>
                     <Link href="/hash-manager" className="px-3 py-2 rounded-md text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors flex items-center">
-                      <ShieldAlert className="h-4 w-4 mr-1" />
+                      
                       Hash Manager
                     </Link>
                   </NavigationMenuLink>

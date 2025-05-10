@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
     try {
       // Fetch isteği için bir controller ve timeout oluştur
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 saniye timeout
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 saniye timeout (arttırıldı)
       
       try {
         const response = await fetch(MALWARE_BAZAAR_HASH_URL, {
@@ -117,18 +117,17 @@ export async function POST(request: NextRequest) {
         }
         
         // Vercel ortamı için batch boyutunu ayarla
-        const BATCH_SIZE = isVercel ? 25 : 50; // Vercel için daha küçük bir batch boyutu
+        const BATCH_SIZE = isVercel ? 10 : 50; // Vercel için çok daha küçük bir batch boyutu
         console.log(`Using batch size: ${BATCH_SIZE}, Vercel environment: ${isVercel ? 'yes' : 'no'}`);
         
-        // Küçük bir örnek alt küme ile çalış
-        const hashesToProcess = isVercel ? validHashes.slice(0, 100) : validHashes;
-        console.log(`Will process ${hashesToProcess.length} out of ${validHashes.length} hashes`);
+        // Tüm hash'leri işleyeceğiz, sınırlama yok
+        console.log(`Will process all ${validHashes.length} hashes`);
         
         // Hash'leri batch olarak işle
         let processedCount = 0;
-        for (let i = 0; i < hashesToProcess.length; i += BATCH_SIZE) {
-          const batch = hashesToProcess.slice(i, i + BATCH_SIZE);
-          console.log(`Processing batch ${i/BATCH_SIZE + 1} with ${batch.length} hashes...`);
+        for (let i = 0; i < validHashes.length; i += BATCH_SIZE) {
+          const batch = validHashes.slice(i, i + BATCH_SIZE);
+          console.log(`Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(validHashes.length/BATCH_SIZE)} with ${batch.length} hashes...`);
           
           try {
             // Her hash için bir upsert işlemi oluştur
@@ -151,9 +150,28 @@ export async function POST(request: NextRequest) {
             await Promise.all(operations);
             
             processedCount += batch.length;
-            console.log(`Successfully processed ${processedCount}/${hashesToProcess.length} hashes`);
+            
+            // Her 100 hash'te bir ilerleme raporu
+            if (processedCount % 100 === 0 || processedCount === validHashes.length) {
+              console.log(`Successfully processed ${processedCount}/${validHashes.length} hashes (${Math.round(processedCount/validHashes.length*100)}%)`);
+            }
           } catch (dbError) {
             console.error("Database error while processing batch:", dbError);
+            
+            // Başarısız olan batch'i loglayalım
+            console.error(`Failed batch indices: ${i} to ${i + BATCH_SIZE}`);
+            
+            // Hata oluşsa bile devam etmeyi deneyelim, başarıyla işlediğimiz hash sayısını raporlayalım
+            if (processedCount > 0) {
+              return NextResponse.json({
+                success: true,
+                message: `Partially imported ${processedCount} out of ${validHashes.length} hashes before encountering an error`,
+                count: processedCount,
+                total: validHashes.length,
+                error: dbError instanceof Error ? dbError.message : String(dbError)
+              });
+            }
+            
             return createErrorResponse(
               "Database error while processing hashes", 
               dbError instanceof Error ? dbError.message : String(dbError),
@@ -172,7 +190,7 @@ export async function POST(request: NextRequest) {
         clearTimeout(timeoutId);
         
         if (fetchTimeoutError.name === 'AbortError') {
-          console.error("Fetch request timed out after 15 seconds");
+          console.error("Fetch request timed out after 30 seconds");
           return createErrorResponse("Request to MalwareBazaar timed out", "The request took too long to complete", 504);
         }
         

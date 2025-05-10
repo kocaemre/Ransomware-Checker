@@ -47,6 +47,24 @@ export default function HashManager() {
     );
   }
 
+  // Hata mesajını düzgün formatlama yardımcı fonksiyonu
+  const formatErrorMessage = (error: unknown): string => {
+    if (error instanceof Error) {
+      return error.message;
+    }
+    
+    if (typeof error === 'object' && error !== null) {
+      // Object.keys ve JSON.stringify kullanarak object mesajını formatla
+      try {
+        return JSON.stringify(error);
+      } catch {
+        return 'An unknown error occurred';
+      }
+    }
+    
+    return String(error || 'An unknown error occurred');
+  };
+
   // MalwareBazaar'dan hashler getir
   const updateHashes = async () => {
     setIsLoading(true);
@@ -73,13 +91,20 @@ export default function HashManager() {
       try {
         data = await response.json();
       } catch (jsonError) {
+        console.error("JSON parse error:", jsonError);
         throw new Error(`Failed to parse JSON response: ${jsonError instanceof Error ? jsonError.message : "Unknown error"}`);
       }
 
       // API hata kontrolü
       if (!response.ok) {
-        const errorMessage = data.error || data.message || "Failed to update hash database";
-        throw new Error(errorMessage);
+        const errorMessage = typeof data.error === 'string' 
+          ? data.error 
+          : typeof data.details === 'string' 
+            ? data.details 
+            : JSON.stringify(data.error || data.details || data);
+            
+        console.error("API error response:", data);
+        throw new Error(errorMessage || "Failed to update hash database");
       }
 
       // Başarılı yanıt kontrolü
@@ -96,7 +121,7 @@ export default function HashManager() {
     } catch (error) {
       console.error("Update error:", error);
       toast.error("Failed to update hash database", {
-        description: error instanceof Error ? error.message : "Unknown error",
+        description: formatErrorMessage(error),
       });
     } finally {
       setIsLoading(false);
@@ -145,8 +170,13 @@ export default function HashManager() {
 
       // API hata kontrolü
       if (!response.ok) {
-        const errorMessage = data.error || data.message || "Failed to add custom hash";
-        throw new Error(errorMessage);
+        const errorMessage = typeof data.error === 'string' 
+          ? data.error 
+          : typeof data.details === 'string' 
+            ? data.details 
+            : JSON.stringify(data.error || data.details || data);
+            
+        throw new Error(errorMessage || "Failed to add custom hash");
       }
 
       toast.success("Custom hash added successfully");
@@ -157,7 +187,7 @@ export default function HashManager() {
     } catch (error) {
       console.error("Add hash error:", error);
       toast.error("Failed to add custom hash", {
-        description: error instanceof Error ? error.message : "Unknown error",
+        description: formatErrorMessage(error),
       });
     } finally {
       setIsLoading(false);

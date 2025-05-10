@@ -6,25 +6,28 @@ import { prisma } from "@/lib/prisma";
 // MalwareBazaar'dan hash'leri almak için kullanılacak URL
 const MALWARE_BAZAAR_HASH_URL = "https://bazaar.abuse.ch/export/txt/sha256/recent/";
 
+// Hata yanıtları için yardımcı fonksiyon
+function createErrorResponse(message: string, details: any = null, status: number = 500) {
+  return NextResponse.json({
+    error: message,
+    details: details ? (typeof details === 'object' ? JSON.stringify(details) : details) : null,
+    timestamp: new Date().toISOString(),
+  }, { status });
+}
+
 export async function POST(request: NextRequest) {
   try {
     // Kullanıcı oturumunu kontrol et
     const session = await getServerSession(authOptions);
     
     if (!session?.user?.id) {
-      return NextResponse.json(
-        { error: "Unauthorized" },
-        { status: 401 }
-      );
+      return createErrorResponse("Unauthorized", null, 401);
     }
     
     // Admin kontrolü - sadece belirli email hesabı
     const isAdmin = session.user?.email === "zeze@gmail.com";
     if (!isAdmin) {
-      return NextResponse.json(
-        { error: "Admin privileges required" },
-        { status: 403 }
-      );
+      return createErrorResponse("Admin privileges required", null, 403);
     }
     
     // MalwareBazaar'dan hash listesini al
@@ -42,7 +45,11 @@ export async function POST(request: NextRequest) {
       });
       
       if (!response.ok) {
-        throw new Error(`Failed to fetch hash list: ${response.status} - ${response.statusText}`);
+        return createErrorResponse(
+          "Failed to fetch hash list from MalwareBazaar", 
+          `Status: ${response.status}, Message: ${response.statusText}`,
+          503
+        );
       }
       
       // Yanıtın içeriğini doğrula
@@ -55,7 +62,7 @@ export async function POST(request: NextRequest) {
       
       // Cevabın boş olup olmadığını kontrol et
       if (!text || text.trim().length === 0) {
-        throw new Error('Empty response received from MalwareBazaar');
+        return createErrorResponse("Empty response received from MalwareBazaar", null, 503);
       }
       
       // Hash'leri ayıkla (# ile başlayan satırları atla)
@@ -95,27 +102,36 @@ export async function POST(request: NextRequest) {
       for (let i = 0; i < validHashes.length; i += BATCH_SIZE) {
         const batch = validHashes.slice(i, i + BATCH_SIZE);
         
-        // Her hash için bir upsert işlemi oluştur
-        const operations = batch.map(hash => {
-          return prisma.maliciousHash.upsert({
-            where: { hash },
-            update: { 
-              updatedAt: new Date(),
-              // Eğer kayıt zaten varsa, sadece updatedAt güncellenir
-            },
-            create: {
-              hash,
-              source: "malwarebazaar",
-              description: "MalwareBazaar recent hash list",
-            }
+        try {
+          // Her hash için bir upsert işlemi oluştur
+          const operations = batch.map(hash => {
+            return prisma.maliciousHash.upsert({
+              where: { hash },
+              update: { 
+                updatedAt: new Date(),
+                // Eğer kayıt zaten varsa, sadece updatedAt güncellenir
+              },
+              create: {
+                hash,
+                source: "malwarebazaar",
+                description: "MalwareBazaar recent hash list",
+              }
+            });
           });
-        });
-        
-        // Tüm işlemleri paralel olarak gerçekleştir
-        await Promise.all(operations);
-        
-        processedCount += batch.length;
-        console.log(`Processed ${processedCount}/${validHashes.length} hashes`);
+          
+          // Tüm işlemleri paralel olarak gerçekleştir
+          await Promise.all(operations);
+          
+          processedCount += batch.length;
+          console.log(`Processed ${processedCount}/${validHashes.length} hashes`);
+        } catch (dbError) {
+          console.error("Database error while processing batch:", dbError);
+          return createErrorResponse(
+            "Database error while processing hashes", 
+            dbError instanceof Error ? dbError.message : String(dbError),
+            500
+          );
+        }
       }
       
       return NextResponse.json({
@@ -128,17 +144,19 @@ export async function POST(request: NextRequest) {
       console.error("Error fetching from MalwareBazaar:", fetchError);
       
       // MalwareBazaar API hatası için özel bir yanıt döndür
-      return NextResponse.json({
-        error: "Failed to fetch data from MalwareBazaar",
-        details: fetchError instanceof Error ? fetchError.message : 'Unknown error'
-      }, { status: 503 });
+      return createErrorResponse(
+        "Failed to fetch data from MalwareBazaar", 
+        fetchError instanceof Error ? fetchError.message : String(fetchError),
+        503
+      );
     }
     
   } catch (error) {
     console.error("Error updating hash database:", error);
-    return NextResponse.json({
-      error: "Failed to update hash database",
-      details: error instanceof Error ? error.message : 'Unknown error'
-    }, { status: 500 });
+    return createErrorResponse(
+      "Failed to update hash database", 
+      error instanceof Error ? error.message : String(error),
+      500
+    );
   }
 } 

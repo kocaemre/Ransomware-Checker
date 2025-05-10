@@ -53,14 +53,40 @@ export default function HashManager() {
     try {
       const response = await fetch("/api/hash-update", {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        cache: "no-store",
       });
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to update hash database");
+      // İlk önce yanıtın içerik türünü kontrol edelim
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        const errorText = await response.text();
+        console.error("Non-JSON response received:", errorText);
+        throw new Error(`API returned non-JSON response: ${errorText.substring(0, 100)}...`);
       }
 
-      const data = await response.json();
+      // JSON yanıtını parse edelim
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        throw new Error(`Failed to parse JSON response: ${jsonError instanceof Error ? jsonError.message : "Unknown error"}`);
+      }
+
+      // API hata kontrolü
+      if (!response.ok) {
+        const errorMessage = data.error || data.message || "Failed to update hash database";
+        throw new Error(errorMessage);
+      }
+
+      // Başarılı yanıt kontrolü
+      if (!data.success && !data.count) {
+        throw new Error(data.message || "Hash update completed with no data");
+      }
+
       toast.success("Hash database updated successfully", {
         description: `Imported ${data.count} malicious hashes from MalwareBazaar.`,
       });
@@ -92,6 +118,7 @@ export default function HashManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Accept": "application/json"
         },
         body: JSON.stringify({
           hash: customHash,
@@ -100,12 +127,28 @@ export default function HashManager() {
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to add custom hash");
+      // İçerik türünü kontrol et
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        const errorText = await response.text();
+        console.error("Non-JSON response received:", errorText);
+        throw new Error(`API returned non-JSON response: ${errorText.substring(0, 100)}...`);
       }
 
-      const data = await response.json();
+      // JSON yanıtını parse et
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        throw new Error(`Failed to parse JSON response: ${jsonError instanceof Error ? jsonError.message : "Unknown error"}`);
+      }
+
+      // API hata kontrolü
+      if (!response.ok) {
+        const errorMessage = data.error || data.message || "Failed to add custom hash";
+        throw new Error(errorMessage);
+      }
+
       toast.success("Custom hash added successfully");
       
       // Reset form

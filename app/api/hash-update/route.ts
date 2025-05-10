@@ -29,66 +29,116 @@ export async function POST(request: NextRequest) {
     
     // MalwareBazaar'dan hash listesini al
     console.log("Fetching hash list from MalwareBazaar...");
-    const response = await fetch(MALWARE_BAZAAR_HASH_URL);
     
-    if (!response.ok) {
-      throw new Error(`Failed to fetch hash list: ${response.statusText}`);
-    }
-    
-    const text = await response.text();
-    
-    // Hash'leri ayıkla (# ile başlayan satırları atla)
-    const hashLines = text.split('\n')
-      .filter(line => line.trim() && !line.trim().startsWith('#'))
-      .map(line => line.trim());
-    
-    console.log(`Found ${hashLines.length} hashes`);
-    
-    // Yığın işlemi için maksimum boyut
-    const BATCH_SIZE = 100;
-    
-    // Hash'leri batch olarak işle
-    let processedCount = 0;
-    for (let i = 0; i < hashLines.length; i += BATCH_SIZE) {
-      const batch = hashLines.slice(i, i + BATCH_SIZE);
-      
-      // Her hash için bir upsert işlemi oluştur
-      const operations = batch.map(hash => {
-        return prisma.maliciousHash.upsert({
-          where: { hash },
-          update: { 
-            updatedAt: new Date(),
-            // Eğer kayıt zaten varsa, sadece updatedAt güncellenir
-          },
-          create: {
-            hash,
-            source: "malwarebazaar",
-            description: "MalwareBazaar recent hash list",
-          }
-        });
+    try {
+      const response = await fetch(MALWARE_BAZAAR_HASH_URL, {
+        method: 'GET',
+        headers: {
+          'Accept': 'text/plain',
+          'User-Agent': 'Ransomware-Checker-App',
+        },
+        cache: 'no-store', // Önbelleği devre dışı bırak
+        next: { revalidate: 0 }, // Next.js 14+ için önbellek devre dışı bırakma
       });
       
-      // Tüm işlemleri paralel olarak gerçekleştir
-      await Promise.all(operations);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch hash list: ${response.status} - ${response.statusText}`);
+      }
       
-      processedCount += batch.length;
-      console.log(`Processed ${processedCount}/${hashLines.length} hashes`);
+      // Yanıtın içeriğini doğrula
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('text/plain')) {
+        console.warn(`Expected text/plain but got ${contentType}`);
+      }
+      
+      const text = await response.text();
+      
+      // Cevabın boş olup olmadığını kontrol et
+      if (!text || text.trim().length === 0) {
+        throw new Error('Empty response received from MalwareBazaar');
+      }
+      
+      // Hash'leri ayıkla (# ile başlayan satırları atla)
+      const hashLines = text.split('\n')
+        .filter(line => line.trim() && !line.trim().startsWith('#'))
+        .map(line => line.trim());
+      
+      console.log(`Found ${hashLines.length} hashes`);
+      
+      // Geçerli hash'ler var mı diye kontrol et
+      if (hashLines.length === 0) {
+        return NextResponse.json({
+          success: false,
+          message: "No valid hashes found in the response"
+        }, { status: 404 });
+      }
+      
+      // Hash formatını doğrula (SHA-256 için 64 karakter)
+      const validHashes = hashLines.filter(hash => /^[a-f0-9]{64}$/i.test(hash));
+      
+      if (validHashes.length !== hashLines.length) {
+        console.warn(`Found ${hashLines.length - validHashes.length} invalid hashes`);
+      }
+      
+      if (validHashes.length === 0) {
+        return NextResponse.json({
+          success: false,
+          message: "No valid SHA-256 hashes found in the response"
+        }, { status: 404 });
+      }
+      
+      // Yığın işlemi için maksimum boyut
+      const BATCH_SIZE = 50; // Vercel için daha küçük bir batch boyutu kullan
+      
+      // Hash'leri batch olarak işle
+      let processedCount = 0;
+      for (let i = 0; i < validHashes.length; i += BATCH_SIZE) {
+        const batch = validHashes.slice(i, i + BATCH_SIZE);
+        
+        // Her hash için bir upsert işlemi oluştur
+        const operations = batch.map(hash => {
+          return prisma.maliciousHash.upsert({
+            where: { hash },
+            update: { 
+              updatedAt: new Date(),
+              // Eğer kayıt zaten varsa, sadece updatedAt güncellenir
+            },
+            create: {
+              hash,
+              source: "malwarebazaar",
+              description: "MalwareBazaar recent hash list",
+            }
+          });
+        });
+        
+        // Tüm işlemleri paralel olarak gerçekleştir
+        await Promise.all(operations);
+        
+        processedCount += batch.length;
+        console.log(`Processed ${processedCount}/${validHashes.length} hashes`);
+      }
+      
+      return NextResponse.json({
+        success: true,
+        message: `Successfully imported ${validHashes.length} malicious hashes from MalwareBazaar`,
+        count: validHashes.length
+      });
+      
+    } catch (fetchError) {
+      console.error("Error fetching from MalwareBazaar:", fetchError);
+      
+      // MalwareBazaar API hatası için özel bir yanıt döndür
+      return NextResponse.json({
+        error: "Failed to fetch data from MalwareBazaar",
+        details: fetchError instanceof Error ? fetchError.message : 'Unknown error'
+      }, { status: 503 });
     }
-    
-    return NextResponse.json({
-      success: true,
-      message: `Successfully imported ${hashLines.length} malicious hashes from MalwareBazaar`,
-      count: hashLines.length
-    });
     
   } catch (error) {
     console.error("Error updating hash database:", error);
-    return NextResponse.json(
-      {
-        error: "Failed to update hash database",
-        details: error instanceof Error ? error.message : 'Unknown error'
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      error: "Failed to update hash database",
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 });
   }
 } 

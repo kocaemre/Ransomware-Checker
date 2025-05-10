@@ -5,11 +5,12 @@ import { useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 import Navbar from "../components/Navbar";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, Database, RefreshCw, AlertTriangle, ShieldAlert } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+import { Loader2, Database, RefreshCw, AlertTriangle, ShieldAlert, Check, StopCircle } from "lucide-react";
 import { toast } from "sonner";
 
 export default function HashManager() {
@@ -20,23 +21,123 @@ export default function HashManager() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [customHash, setCustomHash] = useState("");
   const [customHashDescription, setCustomHashDescription] = useState("");
+  
+  // Hash güncelleme durumu
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [updateStatus, setUpdateStatus] = useState<{
+    processedHashes: number;
+    totalHashes: number;
+    startTime: string | null;
+    lastUpdateTime: string | null;
+    nextStartIndex?: number;
+    hasMore?: boolean;
+    error?: string | null;
+  }>({
+    processedHashes: 0,
+    totalHashes: 0,
+    startTime: null,
+    lastUpdateTime: null
+  });
+  
+  // İlerleme kontrol etme interval'ı
+  const [statusCheckInterval, setStatusCheckInterval] = useState<NodeJS.Timeout | null>(null);
 
   // Admin kontrolü
   const isAdmin = session?.user?.email === "zeze@gmail.com";
 
   // Oturum kontrolünü useEffect ile yap
   useEffect(() => {
-    // status "unauthenticated" olduğunda yönlendir
     if (status === "unauthenticated") {
       router.push("/login");
     } else if (status === "authenticated" && !isAdmin) {
-      // Oturum açık ama admin değilse ana sayfaya yönlendir
       toast.error("You don't have access to this page", {
         description: "Only admins can manage the hash database."
       });
       router.push("/");
     }
   }, [status, router, isAdmin]);
+  
+  // Sayfa yüklendiğinde veya isUpdating değiştiğinde güncelleme durumunu kontrol et
+  useEffect(() => {
+    // Eğer güncelleme yapılıyorsa statusu kontrol et
+    if (isUpdating) {
+      // Interval'ı temizle ve yeniden başlat
+      if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+      }
+      
+      // Her 2 saniyede bir durumu kontrol et
+      const interval = setInterval(checkUpdateStatus, 2000);
+      setStatusCheckInterval(interval);
+      
+      // Temizleme fonksiyonu
+      return () => {
+        if (interval) clearInterval(interval);
+      };
+    } else {
+      // Güncelleme yapılmıyorsa interval'ı temizle
+      if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+        setStatusCheckInterval(null);
+      }
+    }
+  }, [isUpdating]);
+  
+  // Güncelleme durumunu kontrol eden fonksiyon
+  const checkUpdateStatus = async () => {
+    try {
+      const response = await fetch("/api/hash-update", {
+        method: "GET",
+        headers: {
+          "Accept": "application/json"
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error("Failed to fetch update status");
+      }
+      
+      const data = await response.json();
+      
+      // Durum bilgilerini güncelle
+      setUpdateStatus({
+        processedHashes: data.processedHashes,
+        totalHashes: data.totalHashes,
+        startTime: data.startTime,
+        lastUpdateTime: data.lastUpdateTime,
+        error: data.error
+      });
+      
+      // İlerleme durumunu hesapla
+      if (data.totalHashes > 0) {
+        setUpdateProgress(Math.round((data.processedHashes / data.totalHashes) * 100));
+      }
+      
+      // Eğer işlem bitti ise
+      if (!data.isProcessing) {
+        setIsUpdating(false);
+        
+        // Eğer hata yoksa başarı mesajı göster
+        if (!data.error) {
+          toast.success("Hash database update completed", {
+            description: `Imported ${data.processedHashes} hashes successfully.`
+          });
+          
+          setHashCount(data.processedHashes);
+          setLastUpdated(new Date().toLocaleString());
+        } 
+        // Hata varsa hata mesajını göster
+        else {
+          toast.error("Hash update encountered an error", {
+            description: data.error
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Error checking update status:", error);
+    }
+  };
 
   // Eğer oturum yükleniyorsa, yükleme göster
   if (status === "loading") {
@@ -54,7 +155,6 @@ export default function HashManager() {
     }
     
     if (typeof error === 'object' && error !== null) {
-      // Object.keys ve JSON.stringify kullanarak object mesajını formatla
       try {
         return JSON.stringify(error);
       } catch {
@@ -64,37 +164,57 @@ export default function HashManager() {
     
     return String(error || 'An unknown error occurred');
   };
+  
+  // Tarih formatlama fonksiyonu
+  const formatDate = (dateString: string | null): string => {
+    if (!dateString) return "N/A";
+    
+    try {
+      const date = new Date(dateString);
+      return date.toLocaleString();
+    } catch (e) {
+      return dateString;
+    }
+  };
 
   // MalwareBazaar'dan hashler getir
   const updateHashes = async () => {
     setIsLoading(true);
     try {
+      // İlk hash kümesini almak için API çağrısı yap
       const response = await fetch("/api/hash-update", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json"
         },
-        cache: "no-store",
+        body: JSON.stringify({
+          startIndex: 0
+        })
       });
 
-      // İlk önce yanıtın içerik türünü kontrol edelim
+      // İçerik türünü kontrol et
       const contentType = response.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
         const errorText = await response.text();
-        console.error("Non-JSON response received:", errorText);
         throw new Error(`API returned non-JSON response: ${errorText.substring(0, 100)}...`);
       }
 
-      // JSON yanıtını parse edelim
-      let data;
-      try {
-        data = await response.json();
-      } catch (jsonError) {
-        console.error("JSON parse error:", jsonError);
-        throw new Error(`Failed to parse JSON response: ${jsonError instanceof Error ? jsonError.message : "Unknown error"}`);
+      // JSON yanıtını parse et
+      const data = await response.json();
+      
+      // Zaten bir güncelleme işlemi yürütülüyorsa bilgi ver
+      if (!response.ok && data.message === "Hash update is already in progress") {
+        toast.info("Hash update is already in progress", {
+          description: "Please wait for the current update to complete."
+        });
+        
+        // Güncelleme durumunu aktif et
+        setIsUpdating(true);
+        await checkUpdateStatus();
+        return;
       }
-
+      
       // API hata kontrolü
       if (!response.ok) {
         const errorMessage = typeof data.error === 'string' 
@@ -102,30 +222,52 @@ export default function HashManager() {
           : typeof data.details === 'string' 
             ? data.details 
             : JSON.stringify(data.error || data.details || data);
-            
-        console.error("API error response:", data);
-        throw new Error(errorMessage || "Failed to update hash database");
+        throw new Error(errorMessage);
       }
 
-      // Başarılı yanıt kontrolü
-      if (!data.success && !data.count) {
-        throw new Error(data.message || "Hash update completed with no data");
-      }
-
-      toast.success("Hash database updated successfully", {
-        description: `Imported ${data.count} malicious hashes from MalwareBazaar.`,
+      // Güncelleme durumunu aktif et
+      setIsUpdating(true);
+      
+      // Durum bilgilerini güncelle
+      setUpdateStatus({
+        processedHashes: data.totalProcessed || 0,
+        totalHashes: data.totalHashes || 0,
+        startTime: new Date().toISOString(),
+        lastUpdateTime: new Date().toISOString(),
+        nextStartIndex: data.nextStartIndex,
+        hasMore: data.hasMore
       });
       
-      setHashCount(data.count);
-      setLastUpdated(new Date().toLocaleString());
+      // İlerleme durumunu hesapla
+      if (data.totalHashes > 0) {
+        setUpdateProgress(Math.round((data.totalProcessed / data.totalHashes) * 100));
+      }
+      
+      // Eğer daha fazla hash varsa ve hasMore true ise, diğer hashler için devam fonksiyonu çağrılacak
+      if (!data.hasMore) {
+        setIsUpdating(false);
+        toast.success("Hash database updated successfully", {
+          description: `Imported ${data.totalProcessed} hashes from MalwareBazaar.`,
+        });
+        
+        setHashCount(data.totalProcessed);
+        setLastUpdated(new Date().toLocaleString());
+      }
     } catch (error) {
       console.error("Update error:", error);
       toast.error("Failed to update hash database", {
         description: formatErrorMessage(error),
       });
+      setIsUpdating(false);
     } finally {
       setIsLoading(false);
     }
+  };
+  
+  // Güncellemeyi durdur
+  const stopUpdate = async () => {
+    setIsUpdating(false);
+    toast.info("Update process will be stopped after the current batch completes");
   };
 
   // Özel hash ekle
@@ -228,30 +370,60 @@ export default function HashManager() {
                     This will import SHA-256 hashes of recently identified malware.
                   </p>
                   
-                  {hashCount && lastUpdated && (
+                  {/* İlerleme göstergesi */}
+                  {isUpdating && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm text-gray-500">
+                        <span>Processing...</span>
+                        <span>{updateProgress}%</span>
+                      </div>
+                      <Progress value={updateProgress} className="h-2" />
+                      <div className="text-xs text-gray-500 space-y-1">
+                        <div>Processed: {updateStatus.processedHashes} / {updateStatus.totalHashes} hashes</div>
+                        {updateStatus.startTime && (
+                          <div>Started: {formatDate(updateStatus.startTime)}</div>
+                        )}
+                        {updateStatus.lastUpdateTime && (
+                          <div>Last update: {formatDate(updateStatus.lastUpdateTime)}</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {hashCount && lastUpdated && !isUpdating && (
                     <div className="text-sm text-gray-600 bg-gray-50 p-3 rounded-md">
                       <p><strong>Last Update:</strong> {lastUpdated}</p>
                       <p><strong>Hashes Imported:</strong> {hashCount}</p>
                     </div>
                   )}
                   
-                  <Button 
-                    className="w-full" 
-                    onClick={updateHashes}
-                    disabled={isLoading}
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Updating...
-                      </>
-                    ) : (
-                      <>
-                        <RefreshCw className="mr-2 h-4 w-4" />
-                        Update Hash Database
-                      </>
-                    )}
-                  </Button>
+                  {isUpdating ? (
+                    <Button 
+                      className="w-full bg-red-600 hover:bg-red-700" 
+                      onClick={stopUpdate}
+                    >
+                      <StopCircle className="mr-2 h-4 w-4" />
+                      Stop Update
+                    </Button>
+                  ) : (
+                    <Button 
+                      className="w-full" 
+                      onClick={updateHashes}
+                      disabled={isLoading}
+                    >
+                      {isLoading ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Updating...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="mr-2 h-4 w-4" />
+                          Update Hash Database
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>

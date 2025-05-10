@@ -20,6 +20,51 @@ const isVercelProduction = process.env.VERCEL_ENV === 'production';
 const isVercelPreview = process.env.VERCEL_ENV === 'preview';
 const isVercel = isVercelProduction || isVercelPreview;
 
+// İşlem durumu için global değişkenler
+let processingStatus = {
+  isProcessing: false,
+  totalHashes: 0,
+  processedHashes: 0,
+  startTime: null as Date | null,
+  lastUpdateTime: null as Date | null,
+  batchSize: 0,
+  error: null as string | null
+};
+
+// Parça boyutu - Vercel için çok daha küçük
+const BATCH_SIZE = isVercel ? 10 : 50;
+// Maksimum bir seferde işlenecek hash sayısı
+const MAX_HASHES_PER_REQUEST = isVercel ? 50 : 250;
+
+// İşlem durumunu kontrol eden API endpoint'i
+export async function GET(request: NextRequest) {
+  const session = await getServerSession(authOptions);
+  
+  if (!session?.user?.id) {
+    return createErrorResponse("Unauthorized", null, 401);
+  }
+  
+  // Admin kontrolü
+  const isAdmin = session.user?.email === "zeze@gmail.com";
+  if (!isAdmin) {
+    return createErrorResponse("Admin privileges required", null, 403);
+  }
+  
+  // İşlem durum bilgilerini döndür
+  return NextResponse.json({
+    isProcessing: processingStatus.isProcessing,
+    totalHashes: processingStatus.totalHashes,
+    processedHashes: processingStatus.processedHashes,
+    progress: processingStatus.totalHashes > 0 
+      ? Math.round((processingStatus.processedHashes / processingStatus.totalHashes) * 100) 
+      : 0,
+    startTime: processingStatus.startTime,
+    lastUpdateTime: processingStatus.lastUpdateTime,
+    batchSize: processingStatus.batchSize,
+    error: processingStatus.error
+  });
+}
+
 export async function POST(request: NextRequest) {
   try {
     console.log("Starting hash update process in environment:", process.env.VERCEL_ENV || 'local');
@@ -37,13 +82,51 @@ export async function POST(request: NextRequest) {
       return createErrorResponse("Admin privileges required", null, 403);
     }
     
+    // Zaten işlem yapılıyorsa yeni işlem başlatma
+    if (processingStatus.isProcessing) {
+      return NextResponse.json({
+        success: false,
+        message: "Hash update is already in progress",
+        progress: processingStatus.totalHashes > 0 
+          ? Math.round((processingStatus.processedHashes / processingStatus.totalHashes) * 100) 
+          : 0,
+        processedHashes: processingStatus.processedHashes,
+        totalHashes: processingStatus.totalHashes,
+        startTime: processingStatus.startTime
+      });
+    }
+    
+    // İşleme durumunu sıfırla ve başlat
+    processingStatus = {
+      isProcessing: true,
+      totalHashes: 0,
+      processedHashes: 0,
+      startTime: new Date(),
+      lastUpdateTime: new Date(),
+      batchSize: BATCH_SIZE,
+      error: null
+    };
+    
+    // Request gövdesini parse et (isteğe bağlı parametreler)
+    let startIndex = 0;
+    let limit = MAX_HASHES_PER_REQUEST;
+    
+    try {
+      const body = await request.json();
+      startIndex = body.startIndex || 0;
+      limit = body.limit || MAX_HASHES_PER_REQUEST;
+    } catch (e) {
+      // İsteğin gövdesi yoksa varsayılan değerleri kullan
+      console.log("No request body, using default values");
+    }
+    
     // MalwareBazaar'dan hash listesini al
     console.log("Fetching hash list from MalwareBazaar...");
     
     try {
       // Fetch isteği için bir controller ve timeout oluştur
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 saniye timeout (arttırıldı)
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 saniye timeout
       
       try {
         const response = await fetch(MALWARE_BAZAAR_HASH_URL, {
@@ -54,8 +137,8 @@ export async function POST(request: NextRequest) {
             'Cache-Control': 'no-cache',
           },
           signal: controller.signal,
-          cache: 'no-store', // Önbelleği devre dışı bırak
-          next: { revalidate: 0 }, // Next.js 14+ için önbellek devre dışı bırakma
+          cache: 'no-store',
+          next: { revalidate: 0 },
         });
         
         // Timeout'u temizle
@@ -64,6 +147,9 @@ export async function POST(request: NextRequest) {
         console.log(`MalwareBazaar API responded with status: ${response.status}`);
         
         if (!response.ok) {
+          processingStatus.isProcessing = false;
+          processingStatus.error = `Failed to fetch hash list: ${response.status} - ${response.statusText}`;
+          
           return createErrorResponse(
             "Failed to fetch hash list from MalwareBazaar", 
             `Status: ${response.status}, Message: ${response.statusText}`,
@@ -84,6 +170,9 @@ export async function POST(request: NextRequest) {
         
         // Cevabın boş olup olmadığını kontrol et
         if (!text || text.trim().length === 0) {
+          processingStatus.isProcessing = false;
+          processingStatus.error = "Empty response received from MalwareBazaar";
+          
           return createErrorResponse("Empty response received from MalwareBazaar", null, 503);
         }
         
@@ -96,6 +185,9 @@ export async function POST(request: NextRequest) {
         
         // Geçerli hash'ler var mı diye kontrol et
         if (hashLines.length === 0) {
+          processingStatus.isProcessing = false;
+          processingStatus.error = "No valid hashes found in the response";
+          
           return NextResponse.json({
             success: false,
             message: "No valid hashes found in the response"
@@ -110,24 +202,29 @@ export async function POST(request: NextRequest) {
         }
         
         if (validHashes.length === 0) {
+          processingStatus.isProcessing = false;
+          processingStatus.error = "No valid SHA-256 hashes found in the response";
+          
           return NextResponse.json({
             success: false,
             message: "No valid SHA-256 hashes found in the response"
           }, { status: 404 });
         }
         
-        // Vercel ortamı için batch boyutunu ayarla
-        const BATCH_SIZE = isVercel ? 10 : 50; // Vercel için çok daha küçük bir batch boyutu
-        console.log(`Using batch size: ${BATCH_SIZE}, Vercel environment: ${isVercel ? 'yes' : 'no'}`);
+        // Toplam hash sayısını güncelle
+        processingStatus.totalHashes = validHashes.length;
         
-        // Tüm hash'leri işleyeceğiz, sınırlama yok
-        console.log(`Will process all ${validHashes.length} hashes`);
+        // Sadece istenen aralıktaki hash'leri işle
+        const endIndex = Math.min(startIndex + limit, validHashes.length);
+        const hashesToProcess = validHashes.slice(startIndex, endIndex);
+        
+        console.log(`Processing hashes ${startIndex} to ${endIndex - 1} of ${validHashes.length}`);
         
         // Hash'leri batch olarak işle
         let processedCount = 0;
-        for (let i = 0; i < validHashes.length; i += BATCH_SIZE) {
-          const batch = validHashes.slice(i, i + BATCH_SIZE);
-          console.log(`Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(validHashes.length/BATCH_SIZE)} with ${batch.length} hashes...`);
+        for (let i = 0; i < hashesToProcess.length; i += BATCH_SIZE) {
+          const batch = hashesToProcess.slice(i, i + BATCH_SIZE);
+          console.log(`Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(hashesToProcess.length/BATCH_SIZE)} with ${batch.length} hashes...`);
           
           try {
             // Her hash için bir upsert işlemi oluştur
@@ -136,7 +233,6 @@ export async function POST(request: NextRequest) {
                 where: { hash },
                 update: { 
                   updatedAt: new Date(),
-                  // Eğer kayıt zaten varsa, sadece updatedAt güncellenir
                 },
                 create: {
                   hash,
@@ -150,27 +246,37 @@ export async function POST(request: NextRequest) {
             await Promise.all(operations);
             
             processedCount += batch.length;
+            processingStatus.processedHashes = startIndex + processedCount;
+            processingStatus.lastUpdateTime = new Date();
             
-            // Her 100 hash'te bir ilerleme raporu
-            if (processedCount % 100 === 0 || processedCount === validHashes.length) {
-              console.log(`Successfully processed ${processedCount}/${validHashes.length} hashes (${Math.round(processedCount/validHashes.length*100)}%)`);
-            }
+            // İlerleme raporu
+            console.log(`Successfully processed ${processedCount}/${hashesToProcess.length} hashes in this request`);
+            console.log(`Overall progress: ${processingStatus.processedHashes}/${processingStatus.totalHashes} (${Math.round(processingStatus.processedHashes/processingStatus.totalHashes*100)}%)`);
+            
           } catch (dbError) {
             console.error("Database error while processing batch:", dbError);
+            console.error(`Failed batch indices: ${startIndex + i} to ${startIndex + i + BATCH_SIZE}`);
             
-            // Başarısız olan batch'i loglayalım
-            console.error(`Failed batch indices: ${i} to ${i + BATCH_SIZE}`);
+            processingStatus.error = dbError instanceof Error ? dbError.message : String(dbError);
             
-            // Hata oluşsa bile devam etmeyi deneyelim, başarıyla işlediğimiz hash sayısını raporlayalım
-            if (processedCount > 0) {
+            // Hata durumunda devam et, sadece işlenmiş hash sayısını güncelle
+            if (processedCount > 0 || processingStatus.processedHashes > 0) {
+              // İşlemi bitir - bu hatayı client tarafında göster ve devam etmesini iste
+              processingStatus.isProcessing = false;
+              
               return NextResponse.json({
                 success: true,
-                message: `Partially imported ${processedCount} out of ${validHashes.length} hashes before encountering an error`,
-                count: processedCount,
-                total: validHashes.length,
+                message: `Partially imported ${processedCount} hashes in this request before encountering an error`,
+                processedInThisRequest: processedCount,
+                totalProcessed: processingStatus.processedHashes,
+                totalHashes: processingStatus.totalHashes,
+                nextStartIndex: startIndex + processedCount,
+                hasMore: startIndex + processedCount < validHashes.length,
                 error: dbError instanceof Error ? dbError.message : String(dbError)
               });
             }
+            
+            processingStatus.isProcessing = false;
             
             return createErrorResponse(
               "Database error while processing hashes", 
@@ -180,14 +286,31 @@ export async function POST(request: NextRequest) {
           }
         }
         
+        // Bütün hash'ler işlendi mi kontrol et
+        const hasMore = endIndex < validHashes.length;
+        
+        // Eğer daha fazla hash yoksa işlemi bitir
+        if (!hasMore) {
+          processingStatus.isProcessing = false;
+        }
+        
         return NextResponse.json({
           success: true,
-          message: `Successfully imported ${processedCount} malicious hashes from MalwareBazaar`,
-          count: processedCount,
-          total: validHashes.length
+          message: `Successfully processed ${processedCount} hashes in this request`,
+          processedInThisRequest: processedCount,
+          totalProcessed: processingStatus.processedHashes,
+          totalHashes: processingStatus.totalHashes,
+          nextStartIndex: endIndex,
+          hasMore: hasMore,
+          progress: Math.round(processingStatus.processedHashes/processingStatus.totalHashes*100)
         });
       } catch (fetchTimeoutError: any) {
         clearTimeout(timeoutId);
+        
+        processingStatus.isProcessing = false;
+        processingStatus.error = fetchTimeoutError.name === 'AbortError' 
+          ? "Request to MalwareBazaar timed out" 
+          : fetchTimeoutError.message;
         
         if (fetchTimeoutError.name === 'AbortError') {
           console.error("Fetch request timed out after 30 seconds");
@@ -199,6 +322,9 @@ export async function POST(request: NextRequest) {
     } catch (fetchError) {
       console.error("Error fetching from MalwareBazaar:", fetchError);
       
+      processingStatus.isProcessing = false;
+      processingStatus.error = fetchError instanceof Error ? fetchError.message : String(fetchError);
+      
       // MalwareBazaar API hatası için özel bir yanıt döndür
       return createErrorResponse(
         "Failed to fetch data from MalwareBazaar", 
@@ -209,6 +335,10 @@ export async function POST(request: NextRequest) {
     
   } catch (error) {
     console.error("Error updating hash database:", error);
+    
+    processingStatus.isProcessing = false;
+    processingStatus.error = error instanceof Error ? error.message : String(error);
+    
     return createErrorResponse(
       "Failed to update hash database", 
       error instanceof Error ? error.message : String(error),
